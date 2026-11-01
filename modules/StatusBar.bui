@@ -1,0 +1,247 @@
+#If TargetMac Then
+    ' The bundled Buoy runtime keeps an unretained NSStatusItem in the first
+    ' pointer of its opaque status-item record. Hold it until that record is freed.
+    Private Declare Function CopyStatusItemPointer Lib "c" Alias "memcpy" (ByRef destination As Ptr, source As Ptr, count As Integer) As Ptr
+    Private Declare Function RetainStatusItem Lib "objc" Alias "objc_retain" (object As Ptr) As Ptr
+    Private Declare Function StatusClass Lib "objc" Alias "objc_getClass" (name As String) As Ptr
+    Private Delegate Function CopyStatusClasses(ByRef count As UInt32) As Ptr
+    Private Declare Sub FreeStatusClasses Lib "c" Alias "free" (classes As Ptr)
+    Private Declare Function StatusIsKind Lib "Foundation" Selector "isKindOfClass:" (object As Ptr, cls As Ptr) As UInt8
+    Private Declare Function StatusObjectClass Lib "objc" Alias "object_getClass" (object As Ptr) As Ptr
+    Private Delegate Function NativeAllocationSize(object As Ptr) As Integer
+    Private Declare Function FindStatusSymbol Lib "c" Alias "dlsym" (handle As Ptr, name As String) As Ptr
+    Private Function StatusAllocationSize(object As Ptr) As Integer
+        Dim symbol As Ptr = FindStatusSymbol(CType(-2, Ptr), "malloc_size")
+        If symbol = Nil Then Throw New UnsupportedOperationException("Cannot validate the Buoy status-item layout")
+        Dim allocationSize As NativeAllocationSize = CType(symbol, NativeAllocationSize)
+        Return allocationSize(object)
+    End Function
+    Private Function IsCocoaStatusItem(candidate As Ptr) As Boolean
+        Dim symbol As Ptr = FindStatusSymbol(CType(-2, Ptr), "objc_copyClassList")
+        If symbol = Nil Then Return False
+        Dim copyClasses As CopyStatusClasses = CType(symbol, CopyStatusClasses)
+        Dim count As UInt32 = 0
+        Dim classes As Ptr = copyClasses(count)
+        If classes = Nil Then Return False
+        Try
+            Dim candidateClass As Ptr = StatusObjectClass(candidate)
+            Dim total As Integer = count
+            For i As Integer = 0 To total - 1
+                Dim knownClass As Ptr = Nil
+                CopyStatusItemPointer(knownClass, CType(CType(classes, Integer) + i * 8, Ptr), 8)
+                If knownClass = candidateClass Then
+                    Return StatusIsKind(candidate, StatusClass("NSStatusItem")) <> 0
+                End If
+            Next
+            Return False
+        Finally
+            FreeStatusClasses(classes)
+        End Try
+    End Function
+    Private Declare Function StatusIsMain Lib "Foundation" Selector "isMainThread" (cls As Ptr) As UInt8
+    Private Declare Sub ReleaseStatusItem Lib "objc" Alias "objc_release" (object As Ptr)
+#End If
+
+Public Delegate Sub StatusBarActivation(tag As String, doubleClick As Boolean)
+
+Public Function StatusBarAvailable() As Boolean
+    Return Not Application.IsHeadless And StatusItem.IsAvailable()
+End Function
+
+Private Class RoutedStatusItem Inherits StatusItem
+    Public Property Tag As String
+    Public Property Handler As StatusBarActivation = Nil
+    Handle Click()
+        Dim handler As StatusBarActivation = Me.Handler
+        If handler <> Nil Then handler(Me.Tag, False)
+    End Handle
+    Handle DoubleClick()
+        Dim handler As StatusBarActivation = Me.Handler
+        If handler <> Nil Then handler(Me.Tag, True)
+    End Handle
+End Class
+
+#If TargetMac Then
+    Private Class StatusTeardown
+        Public Property Item As RoutedStatusItem = Nil
+        Public Property NativeItem As Ptr = Nil
+    End Class
+    Private Class StatusReleaseTimer Inherits Timer
+        Public Overrides Sub NotifyTick()
+            Me.Stop()
+            Dim pending As Array Of StatusTeardown = StatusCleanup.Releases
+            StatusCleanup.Releases = []
+            For Each item As StatusTeardown In pending
+                If item.Item <> Nil Then
+                    item.Item.Menu = Nil
+                    item.Item.Icon = Nil
+                    item.Item = Nil
+                End If
+                If item.NativeItem <> Nil Then ReleaseStatusItem(item.NativeItem)
+                item.NativeItem = Nil
+            Next
+        End Sub
+    End Class
+    Private Class StatusCleanup
+        Public Shared Property Guard As Mutex = New Mutex()
+        Public Shared Property Pending As Array Of StatusTeardown = []
+        Public Shared Property Releases As Array Of StatusTeardown = []
+        Public Shared Property ReleaseTimer As StatusReleaseTimer = Nil
+    End Class
+    Private Sub DisposeStatusItem(pending As StatusTeardown)
+        If pending.Item <> Nil Then
+            pending.Item.Visible = False
+            pending.Item.Handler = Nil
+        End If
+        If pending.Item <> Nil Or pending.NativeItem <> Nil Then
+            ' Keep both the callback record and its button until tracking unwinds.
+            Array.Append(StatusCleanup.Releases, pending)
+            If StatusCleanup.ReleaseTimer = Nil Then
+                StatusCleanup.ReleaseTimer = New StatusReleaseTimer()
+                StatusCleanup.ReleaseTimer.Period = 1
+            End If
+            StatusCleanup.ReleaseTimer.Start()
+        End If
+    End Sub
+    Private Sub DrainStatusTeardown()
+        Dim pending As Array Of StatusTeardown = []
+        SyncLock StatusCleanup.Guard
+            pending = StatusCleanup.Pending
+            StatusCleanup.Pending = []
+        End SyncLock
+        For Each item As StatusTeardown In pending
+            DisposeStatusItem(item)
+        Next
+    End Sub
+    Private Sub RetireStatusItem(pending As StatusTeardown)
+        If StatusIsMain(StatusClass("NSThread")) <> 0 Then
+            DisposeStatusItem(pending)
+        Else
+            SyncLock StatusCleanup.Guard
+                Array.Append(StatusCleanup.Pending, pending)
+            End SyncLock
+            MainThread.InvokeAsync(AddressOf DrainStatusTeardown)
+        End If
+    End Sub
+#End If
+
+''' Construction is inert; Show creates the native item. Close releases its native resources.
+Public Class StatusBarController
+    Private Property Item As RoutedStatusItem = Nil
+    #If TargetMac Then
+        Private Property NativeItem As Ptr = Nil
+    #End If
+    Private Property Tag As String
+    Private Property Handler As StatusBarActivation = Nil
+    Private Property Icon As Picture = Nil
+    Private Property Menu As Menu = Nil
+    Private Property ToolTip As String
+    Private Property IconName As String
+    Private Property TemplateIcon As Boolean = True
+    Private Property Closed As Boolean = False
+
+    Public Sub Constructor(tag As String, handler As StatusBarActivation = Nil)
+        If tag = "" Then Throw New InvalidArgumentException("Status item tag is required")
+        Me.Tag = tag
+        Me.Handler = handler
+    End Sub
+
+    Public Property IsVisible As Boolean
+        Get
+            If Me.Item = Nil Then Return False
+            Return Me.Item.Visible
+        End Get
+    End Property
+    Public Property IsClosed As Boolean
+        Get
+            Return Me.Closed
+        End Get
+    End Property
+
+    Public Sub Configure(toolTip As String, icon As Picture, menu As Optional Of Menu = None, iconName As String = "", templateIcon As Boolean = True)
+        If Me.Closed Then Throw New InvalidArgumentException("Status item is closed")
+        If Me.Item <> Nil Then
+            #If TargetLinux Then
+                If icon = Nil And iconName = "" Then Throw New InvalidArgumentException("An icon or Linux icon name is required")
+            #Else
+                If icon = Nil Then Throw New InvalidArgumentException("An icon is required for a live status item")
+            #End If
+        End If
+        Me.ToolTip = toolTip
+        Me.Icon = icon
+        Me.Menu = Nil
+        If menu.HasValue Then Me.Menu = menu.Value
+        Me.IconName = iconName
+        Me.TemplateIcon = templateIcon
+        If Me.Item <> Nil Then Me.ApplyConfiguration()
+    End Sub
+
+    Private Sub ApplyConfiguration()
+        Me.Item.ToolTip = Me.ToolTip
+        Me.Item.Icon = Me.Icon
+        Me.Item.IconIsTemplate = Me.TemplateIcon
+        Me.Item.IconName = Me.IconName
+        Me.Item.Menu = Me.Menu
+    End Sub
+
+    Public Sub Show()
+        If Me.Closed Then Throw New InvalidArgumentException("Status item is closed")
+        If Not StatusBarAvailable() Then Throw New UnsupportedOperationException("No status item host is available")
+        #If TargetLinux Then
+            If Me.Icon = Nil And Me.IconName = "" Then Throw New InvalidArgumentException("An icon or Linux icon name is required")
+        #Else
+            If Me.Icon = Nil Then Throw New InvalidArgumentException("An icon is required")
+        #End If
+        If Me.Item = Nil Then
+            Me.Item = New RoutedStatusItem()
+            #If TargetMac Then
+                Dim nativeItem As Ptr = Nil
+                Dim record As Ptr = Me.Item.NativeHandle
+                If record = Nil Then Throw New UnsupportedOperationException("Buoy returned no native status-item record")
+                If StatusAllocationSize(record) < 8 Then Throw New UnsupportedOperationException("Unsupported Buoy status-item record layout")
+                CopyStatusItemPointer(nativeItem, record, 8)
+                If nativeItem = Nil Then Throw New UnsupportedOperationException("Buoy returned no Cocoa status item")
+                If StatusAllocationSize(nativeItem) < 8 Then Throw New UnsupportedOperationException("Unsupported Cocoa status-item pointer")
+                ' Verify isa against registered classes before sending an Objective-C message.
+                If Not IsCocoaStatusItem(nativeItem) Then Throw New UnsupportedOperationException("Unsupported Cocoa status-item class")
+                Me.NativeItem = RetainStatusItem(nativeItem)
+            #End If
+            Me.Item.Tag = Me.Tag
+            Me.Item.Handler = Me.Handler
+            Me.ApplyConfiguration()
+        End If
+        Me.Item.Visible = True
+    End Sub
+
+    Public Sub Hide()
+        If Me.Item <> Nil Then Me.Item.Visible = False
+    End Sub
+
+    Public Sub Close()
+        If Me.Closed Then Return
+        Me.Closed = True
+        #If TargetMac Then
+            Dim pending As New StatusTeardown()
+            pending.Item = Me.Item
+            pending.NativeItem = Me.NativeItem
+            Me.Item = Nil
+            Me.NativeItem = Nil
+            RetireStatusItem(pending)
+        #Else
+            If Me.Item <> Nil Then
+                Me.Item.Visible = False
+                Me.Item.Handler = Nil
+                Me.Item.Menu = Nil
+                Me.Item.Icon = Nil
+                Me.Item = Nil
+            End If
+        #End If
+        Me.Handler = Nil
+        Me.Icon = Nil
+        Me.Menu = Nil
+    End Sub
+
+    Public Sub Destructor()
+        Me.Close()
+    End Sub
+End Class
