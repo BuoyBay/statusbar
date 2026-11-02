@@ -2,7 +2,7 @@
     "schema": 1,
     "name": "statusbar",
     "version": "0.1.0",
-    "description": "Menu-bar and tray status items",
+    "description": "Menu-bar status items",
     "platforms": [
         "arm64-apple-macos",
         "x86_64-apple-macos",

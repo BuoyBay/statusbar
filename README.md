@@ -1,4 +1,4 @@
-# Menu-bar and tray status items
+# Menu-bar status items
 
 Lifecycle-managed menu bar / tray items built on the existing native
 `StatusItem`. `Import statusbar`. This adds deferred creation, consistent
