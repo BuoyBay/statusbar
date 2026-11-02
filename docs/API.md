@@ -31,9 +31,3 @@ GNOME needs a compatible host/extension, detected by `StatusBarAvailable`. A Lin
 host can route every click to the menu instead of invoking activation, and there
 is no Linux double-click protocol. The package cannot turn a normal app into a
 menu-bar-only process or keep Buoy alive after its last window closes.
-
-## Verification
-
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-

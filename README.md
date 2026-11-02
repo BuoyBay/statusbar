@@ -1,6 +1,6 @@
 # Manage menu-bar and tray status items
 
-Lifecycle-managed menu bar / tray items built on Buoy's existing native
+Lifecycle-managed menu bar / tray items built on the existing native
 `StatusItem`. `Import statusbar`. This adds deferred creation, consistent
 configuration, routing by tag, availability checks and deterministic close.
 
@@ -54,8 +54,6 @@ On your own machine, install Buoy and run:
 ```sh
 buoy ai init --both
 ```
-
-The generated agent files and editor settings stay local and are ignored by Git.
 
 ## Contributing
 
