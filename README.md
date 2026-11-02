@@ -1,4 +1,4 @@
-# Manage menu-bar and tray status items
+# Menu-bar and tray status items
 
 Lifecycle-managed menu bar / tray items built on the existing native
 `StatusItem`. `Import statusbar`. This adds deferred creation, consistent
@@ -23,7 +23,7 @@ consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Import statusbar
 
 Function ShowApplicationStatus(icon As Picture) As StatusBarController
